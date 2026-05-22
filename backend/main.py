@@ -33,7 +33,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 from supabase import Client, create_client
 
-from services import enrich_event_with_llm, normalize_input, persist_event
+from services import enrich_event_with_llm, fetch_events, normalize_input, persist_event
 
 load_dotenv()
 
@@ -374,6 +374,21 @@ async def ingest_event(payload: ParseRequest):
                 "items": [c.model_dump() for c in event.derived_fields.caffeine_items],
                 "total_mg": event.derived_fields.total_caffeine_mg,
             },
+        },
+    )
+
+
+@app.get("/v1/events")
+async def list_events(limit: int = 20):
+    try:
+        events = fetch_events(supabase, WEB_USER_ID, limit)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Supabase read failed: {exc}")
+    return JSONResponse(
+        status_code=200,
+        content={
+            "events": [e.model_dump(mode="json") for e in events],
+            "count": len(events),
         },
     )
 

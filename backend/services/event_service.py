@@ -1,13 +1,14 @@
 """
-services/event_service.py — event normalization, LLM enrichment, persistence.
+services/event_service.py — event normalization, LLM enrichment, persistence,
+                             and read-path reconstruction.
 
-Three functions represent the three stages every ingestion event passes through:
-
+Write path (three stages):
   normalize_input()       raw request fields  →  partially-populated Event
   enrich_event_with_llm() Event + Ollama      →  fully-populated Event
   persist_event()         Event + Supabase    →  row in tasks table
 
-Nothing in main.py calls these yet. They are wired in the next commit.
+Read path:
+  fetch_events()          Supabase            →  list[Event]
 """
 
 from __future__ import annotations
@@ -233,3 +234,87 @@ def persist_event(
         "total_caffeine_mg": event.derived_fields.total_caffeine_mg,
         "created_at":       datetime.now(timezone.utc).isoformat(),
     }).execute()
+
+
+# ---------------------------------------------------------------------------
+# Read path
+# ---------------------------------------------------------------------------
+
+_FALLBACK_TS = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _row_to_event(row: dict[str, Any]) -> Event:
+    """
+    Reconstruct an Event from a Supabase tasks-table row.
+
+    Defensive against None / missing fields — rows written by older backend
+    versions may lack caffeine_items, raw_ideas, or a parseable timestamp.
+    """
+    # timestamp was stored as an ISO string from the client; fall back to
+    # created_at (server-assigned) so the field is always populated
+    raw_ts = row.get("timestamp") or row.get("created_at") or ""
+    try:
+        ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        ts = _FALLBACK_TS
+
+    try:
+        source = EventSource(row.get("source") or "web")
+    except ValueError:
+        source = EventSource.web
+
+    tasks = [
+        ExtractedTask(
+            title=t.get("title", ""),
+            urgency=t.get("urgency", "medium"),
+            focus_tags=t.get("focus_tags") or [],
+            notes=t.get("notes"),
+        )
+        for t in (row.get("tasks") or [])
+        if t.get("title")
+    ]
+
+    caffeine_items = [
+        CaffeineItem(name=c.get("name", ""), mg=int(c.get("mg", 0)))
+        for c in (row.get("caffeine_items") or [])
+        if c.get("name")
+    ]
+
+    return Event(
+        id=uuid_module.UUID(str(row["id"])),
+        timestamp=ts,
+        source=source,
+        raw_content=row.get("raw_text") or "",
+        resolved_type=EventType.brain_dump,
+        derived_fields=DerivedFields(
+            tasks=tasks,
+            raw_ideas=list(row.get("raw_ideas") or []),
+            mood_signal=row.get("mood_signal"),
+            caffeine_items=caffeine_items,
+            total_caffeine_mg=int(row.get("total_caffeine_mg") or 0),
+        ),
+    )
+
+
+def fetch_events(
+    supabase_client: Client,
+    user_id: str,
+    limit: int = 20,
+) -> list[Event]:
+    """
+    Return the most recent events for the given user, newest-first.
+    Hard cap of 100 records per call regardless of the requested limit.
+    """
+    limit = min(max(limit, 1), 100)
+    result = (
+        supabase_client.table("tasks")
+        .select(
+            "id, source, timestamp, raw_text, tasks, raw_ideas, "
+            "mood_signal, caffeine_items, total_caffeine_mg, created_at"
+        )
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return [_row_to_event(row) for row in result.data]
