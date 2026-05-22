@@ -1,8 +1,15 @@
 """
 Brain Dump Ingestion API
-POST /parse  — accepts iOS + Web payloads, deduplicates via Supabase,
-               runs deterministic caffeine pre-parsing, then hits Ollama
-               (Qwen 2.5) for structured JSON extraction.
+
+Endpoints:
+  POST /parse       — legacy ingestion (iOS + web); thin wrapper around
+                      the service layer pipeline
+  POST /v1/events   — versioned ingestion; same pipeline, same response
+  GET  /v1/events   — read latest N events as normalized Event objects
+  GET  /health      — liveness check
+
+All ingestion logic lives in services/event_service.py.
+All domain types live in models/event.py.
 
 Dependencies:
     pip install fastapi uvicorn httpx supabase python-dotenv
@@ -10,20 +17,19 @@ Dependencies:
 Env vars (or .env file):
     SUPABASE_URL
     SUPABASE_SERVICE_ROLE_KEY   (bypasses RLS for server-side writes)
-    OLLAMA_BASE_URL      (default: http://localhost:11434)
-    OLLAMA_MODEL         (default: qwen2.5:1.5b)
+    OLLAMA_BASE_URL             (default: http://localhost:11434)
+    OLLAMA_MODEL                (default: qwen2.5:1.5b)
+    WEB_USER_ID                 (Supabase auth UUID for the owning account)
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any
 
 import httpx
 from dotenv import load_dotenv
@@ -95,9 +101,6 @@ def _load_caffeine_db() -> dict[str, int]:
 
 CAFFEINE_DB: dict[str, int] = _load_caffeine_db()
 
-# Compound-input split pattern: "coffee + red bull", "coffee, red bull"
-_COMPOUND_SEP = re.compile(r"\s*(?:\+|,|&|and)\s*", re.IGNORECASE)
-
 
 # ---------------------------------------------------------------------------
 # Schema
@@ -133,102 +136,6 @@ class ParseRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Deterministic caffeine parsing
-# ---------------------------------------------------------------------------
-def extract_caffeine_items(text: str) -> list[dict[str, Any]]:
-    """
-    Scans the raw text for caffeine-related phrases.
-    Handles compound inputs like 'coffee + Red Bull' or
-    'had a coffee and a Monster this morning'.
-
-    Walks DB keys longest-first so compound names ("cold brew") match before
-    their substrings ("brew"). Blanks matched spans to prevent re-matching.
-    """
-    text_lower = text.lower()
-    found: list[dict[str, Any]] = []
-
-    for name in sorted(CAFFEINE_DB.keys(), key=len, reverse=True):
-        if name in text_lower:
-            found.append({"name": name, "mg": CAFFEINE_DB[name]})
-            # Blank matched span so shorter patterns don't re-match
-            text_lower = text_lower.replace(name, " " * len(name), 1)
-
-    return found
-
-
-def preprocess_text(text: str) -> tuple[str, list[dict[str, Any]]]:
-    """
-    Strips and lightly normalises the input, then extracts caffeine items
-    deterministically before the LLM pass.
-
-    Returns (cleaned_text, caffeine_items).
-    """
-    cleaned = text.strip()
-    cleaned = re.sub(r"\s{2,}", " ", cleaned)
-    caffeine_items = extract_caffeine_items(cleaned)
-    return cleaned, caffeine_items
-
-
-# ---------------------------------------------------------------------------
-# Ollama integration
-# ---------------------------------------------------------------------------
-_SYSTEM_PROMPT = """\
-You are a strict JSON extraction engine. Given an unstructured brain dump, \
-extract structured data and return ONLY valid JSON with no prose, no markdown, \
-no code fences, and no explanation.
-
-Output schema (all fields required, use null when unknown):
-{
-  "tasks": [
-    {
-      "title": "<concise action phrase, max 10 words>",
-      "urgency": "<high|medium|low>",
-      "focus_tags": ["<tag>"],
-      "notes": "<optional clarifying detail or null>"
-    }
-  ],
-  "raw_ideas": ["<non-actionable thought or observation>"],
-  "mood_signal": "<positive|neutral|stressed|overwhelmed|null>"
-}
-
-Rules:
-- Do NOT invent dates, deadlines, or specific times unless explicitly stated.
-- Do NOT split one task into multiple unless the user named them separately.
-- Urgency defaults to "medium" when no signal is present.
-- focus_tags should be 1-3 lowercase single-word labels (e.g. health, work, finance, family).
-- raw_ideas captures observations, worries, half-thoughts that are not action items.
-- Return ONLY the JSON object. Nothing else.
-"""
-
-
-async def call_ollama(text: str) -> dict[str, Any]:
-    payload = {
-        "model": OLLAMA_MODEL,
-        "stream": False,
-        "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": text},
-        ],
-    }
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post(
-            f"{OLLAMA_BASE_URL}/api/chat",
-            json=payload,
-        )
-    resp.raise_for_status()
-    raw = resp.json()["message"]["content"].strip()
-
-    # Strip accidental markdown fences if the model slips
-    raw = re.sub(r"^```(?:json)?\s*", "", raw)
-    raw = re.sub(r"\s*```$", "", raw)
-
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Ollama returned non-JSON: {raw[:200]}") from exc
-
-
-# ---------------------------------------------------------------------------
 # Idempotency guard
 # ---------------------------------------------------------------------------
 def is_duplicate(task_id: str) -> bool:
@@ -240,37 +147,6 @@ def is_duplicate(task_id: str) -> bool:
         .execute()
     )
     return len(result.data) > 0
-
-
-# ---------------------------------------------------------------------------
-# Canonical Supabase write
-# ---------------------------------------------------------------------------
-def write_to_supabase(
-    task_id: str,
-    source: str,
-    timestamp: str,
-    raw_text: str,
-    parsed: dict[str, Any],
-    caffeine: list[dict[str, Any]],
-) -> None:
-    tasks = parsed.get("tasks", [])
-    # title is NOT NULL — use first extracted task title, fall back to raw_text prefix
-    title = (tasks[0].get("title") if tasks else None) or raw_text[:120]
-    record = {
-        "id": task_id,
-        "user_id": WEB_USER_ID,
-        "title": title,
-        "source": source,
-        "timestamp": timestamp,
-        "raw_text": raw_text,
-        "tasks": tasks,
-        "raw_ideas": parsed.get("raw_ideas", []),
-        "mood_signal": parsed.get("mood_signal"),
-        "caffeine_items": caffeine,
-        "total_caffeine_mg": sum(c["mg"] for c in caffeine),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    supabase.table("tasks").insert(record).execute()
 
 
 # ---------------------------------------------------------------------------
@@ -286,47 +162,41 @@ async def serve_index():
 
 @app.post("/parse")
 async def parse_brain_dump(payload: ParseRequest):
-    # 1. Idempotency guard — duplicate UUIDs return immediately, no LLM call
     if is_duplicate(payload.id):
         return JSONResponse(
             status_code=200,
             content={"status": "duplicate", "id": payload.id},
         )
 
-    # 2. Deterministic pre-processing + caffeine extraction
-    cleaned_text, caffeine_items = preprocess_text(payload.text_input)
+    event = normalize_input(
+        request_id=payload.id,
+        text_input=payload.text_input,
+        source=payload.source.value,
+        timestamp=payload.timestamp,
+        caffeine_db=CAFFEINE_DB,
+    )
 
-    # 3. LLM extraction
     try:
-        parsed = await call_ollama(cleaned_text)
+        event = await enrich_event_with_llm(event, OLLAMA_BASE_URL, OLLAMA_MODEL)
     except (httpx.HTTPError, ValueError) as exc:
         raise HTTPException(status_code=502, detail=f"LLM error: {exc}")
 
-    # 4. Canonical write — single insert with all data
     try:
-        write_to_supabase(
-            task_id=payload.id,
-            source=payload.source.value,
-            timestamp=payload.timestamp,
-            raw_text=payload.text_input,
-            parsed=parsed,
-            caffeine=caffeine_items,
-        )
+        persist_event(event, supabase, WEB_USER_ID)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Supabase write failed: {exc}")
 
-    # 5. Return structured result to client
     return JSONResponse(
         status_code=200,
         content={
             "status": "ok",
-            "id": payload.id,
-            "tasks": parsed.get("tasks", []),
-            "raw_ideas": parsed.get("raw_ideas", []),
-            "mood_signal": parsed.get("mood_signal"),
+            "id": str(event.id),
+            "tasks": [t.model_dump() for t in event.derived_fields.tasks],
+            "raw_ideas": event.derived_fields.raw_ideas,
+            "mood_signal": event.derived_fields.mood_signal,
             "caffeine": {
-                "items": caffeine_items,
-                "total_mg": sum(c["mg"] for c in caffeine_items),
+                "items": [c.model_dump() for c in event.derived_fields.caffeine_items],
+                "total_mg": event.derived_fields.total_caffeine_mg,
             },
         },
     )
