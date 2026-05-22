@@ -1,18 +1,15 @@
 """
 Brain Dump Ingestion API
 
-Active endpoints:
-  POST /parse       — legacy ingestion (iOS + web); delegates to _ingest()
-  POST /v1/events   — versioned ingestion; delegates to _ingest()
-  GET  /v1/events   — read latest N events as normalized Event objects
-  GET  /health      — liveness check
-
-Deprecated endpoints (410 Gone — preserved as stubs, not yet deleted):
-  /correct          — correction engine removed
-  /readings/*       — liturgical readings removed
-  /caffeine/*       — caffeine reference CRUD removed
-  /focus/*          — focus state management removed
-  /pipelines/*      — pipeline orchestration removed
+Endpoints:
+  POST /parse            — legacy ingestion (iOS + web); delegates to _ingest()
+  POST /v1/events        — versioned ingestion; delegates to _ingest()
+  GET  /v1/events        — unified read: latest N events, with optional filters
+                           ?limit=     max records (default 20, cap 100)
+                           ?type=      EventType value (brain_dump|log_caffeine|…)
+                           ?start_time= ISO-8601 lower bound on created_at
+                           ?end_time=   ISO-8601 upper bound on created_at
+  GET  /health           — liveness check
 
 All ingestion logic lives in services/event_service.py.
 All domain types live in models/event.py.
@@ -39,7 +36,7 @@ from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
@@ -156,6 +153,20 @@ def is_duplicate(task_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _parse_iso(value: str) -> datetime:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid ISO-8601 datetime: {value!r}",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 @app.get("/")
@@ -219,9 +230,21 @@ async def ingest_event(payload: ParseRequest):
 
 
 @app.get("/v1/events")
-async def list_events(limit: int = 20):
+async def list_events(
+    limit: int = 20,
+    event_type: str | None = Query(None, alias="type"),
+    start_time: str | None = None,
+    end_time: str | None = None,
+):
+    start_dt = _parse_iso(start_time) if start_time else None
+    end_dt   = _parse_iso(end_time)   if end_time   else None
     try:
-        events = fetch_events(supabase, WEB_USER_ID, limit)
+        events = fetch_events(
+            supabase, WEB_USER_ID, limit,
+            event_type=event_type,
+            start_time=start_dt,
+            end_time=end_dt,
+        )
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Supabase read failed: {exc}")
     return JSONResponse(
@@ -230,96 +253,6 @@ async def list_events(limit: int = 20):
             "events": [e.model_dump(mode="json") for e in events],
             "count": len(events),
         },
-    )
-
-
-# ---------------------------------------------------------------------------
-# Deprecated endpoints — 410 Gone
-# These routes existed in the pre-v1 backend. Stubs return 410 rather than
-# 404 to distinguish "removed intentionally" from "never existed", and to
-# give clients a machine-readable migration hint.
-# ---------------------------------------------------------------------------
-
-_ALL_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]
-
-
-def _gone(endpoint: str, message: str, use_instead: str | None = None) -> HTTPException:
-    body: dict = {"deprecated": True, "endpoint": endpoint, "message": message}
-    if use_instead:
-        body["use_instead"] = use_instead
-    return HTTPException(status_code=410, detail=body)
-
-
-@app.api_route("/correct", methods=_ALL_METHODS)
-async def _dep_correct():
-    raise _gone(
-        "/correct",
-        "Correction engine removed. Submit new inputs via POST /v1/events.",
-        "POST /v1/events",
-    )
-
-
-@app.api_route("/readings", methods=_ALL_METHODS)
-async def _dep_readings():
-    raise _gone("/readings", "Liturgical readings endpoints have been removed.")
-
-
-@app.api_route("/readings/{rest:path}", methods=_ALL_METHODS)
-async def _dep_readings_sub(rest: str):
-    raise _gone(f"/readings/{rest}", "Liturgical readings endpoints have been removed.")
-
-
-@app.api_route("/caffeine", methods=_ALL_METHODS)
-async def _dep_caffeine():
-    raise _gone(
-        "/caffeine",
-        "Caffeine reference endpoints removed. "
-        "Caffeine is extracted automatically from POST /v1/events text input.",
-        "POST /v1/events",
-    )
-
-
-@app.api_route("/caffeine/{rest:path}", methods=_ALL_METHODS)
-async def _dep_caffeine_sub(rest: str):
-    raise _gone(
-        f"/caffeine/{rest}",
-        "Caffeine reference endpoints removed. "
-        "Caffeine is extracted automatically from POST /v1/events text input.",
-        "POST /v1/events",
-    )
-
-
-@app.api_route("/focus", methods=_ALL_METHODS)
-async def _dep_focus():
-    raise _gone(
-        "/focus",
-        "Focus state management removed from server. Manage focus state client-side.",
-    )
-
-
-@app.api_route("/focus/{rest:path}", methods=_ALL_METHODS)
-async def _dep_focus_sub(rest: str):
-    raise _gone(
-        f"/focus/{rest}",
-        "Focus state management removed from server. Manage focus state client-side.",
-    )
-
-
-@app.api_route("/pipelines", methods=_ALL_METHODS)
-async def _dep_pipelines():
-    raise _gone(
-        "/pipelines",
-        "Pipeline management removed. Ingest directly via POST /v1/events.",
-        "POST /v1/events",
-    )
-
-
-@app.api_route("/pipelines/{rest:path}", methods=_ALL_METHODS)
-async def _dep_pipelines_sub(rest: str):
-    raise _gone(
-        f"/pipelines/{rest}",
-        "Pipeline management removed. Ingest directly via POST /v1/events.",
-        "POST /v1/events",
     )
 
 

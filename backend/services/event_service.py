@@ -285,7 +285,7 @@ def _row_to_event(row: dict[str, Any]) -> Event:
         timestamp=ts,
         source=source,
         raw_content=row.get("raw_text") or "",
-        resolved_type=EventType.brain_dump,
+        resolved_type=_infer_type(row),
         derived_fields=DerivedFields(
             tasks=tasks,
             raw_ideas=list(row.get("raw_ideas") or []),
@@ -296,17 +296,50 @@ def _row_to_event(row: dict[str, Any]) -> Event:
     )
 
 
+def _infer_type(row: dict[str, Any]) -> EventType:
+    """
+    Infer EventType from row content.
+
+    resolved_type is not persisted as a column yet, so we derive it:
+      caffeine items present, no tasks/ideas  →  log_caffeine
+      tasks or raw ideas present              →  brain_dump
+      otherwise                               →  unknown
+    """
+    has_caffeine = bool(row.get("caffeine_items"))
+    has_tasks    = bool(row.get("tasks"))
+    has_ideas    = bool(row.get("raw_ideas"))
+
+    if has_caffeine and not has_tasks and not has_ideas:
+        return EventType.log_caffeine
+    if has_tasks or has_ideas:
+        return EventType.brain_dump
+    return EventType.unknown
+
+
 def fetch_events(
     supabase_client: Client,
     user_id: str,
     limit: int = 20,
+    event_type: str | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
 ) -> list[Event]:
     """
-    Return the most recent events for the given user, newest-first.
-    Hard cap of 100 records per call regardless of the requested limit.
+    Return events for the given user, newest-first.
+
+    start_time / end_time filter on created_at at the database level.
+    event_type filters application-side (resolved_type is not a DB column).
+    When a type filter is active the query fetches the full 100-row cap
+    before filtering so the caller receives up to `limit` typed results.
+
+    Hard cap: 100 rows per call regardless of limit.
     """
     limit = min(max(limit, 1), 100)
-    result = (
+    # Fetch the full cap when type-filtering to avoid under-returning after
+    # the application-side filter discards non-matching rows.
+    fetch_limit = 100 if event_type else limit
+
+    query = (
         supabase_client.table("tasks")
         .select(
             "id, source, timestamp, raw_text, tasks, raw_ideas, "
@@ -314,7 +347,20 @@ def fetch_events(
         )
         .eq("user_id", user_id)
         .order("created_at", desc=True)
-        .limit(limit)
-        .execute()
+        .limit(fetch_limit)
     )
-    return [_row_to_event(row) for row in result.data]
+    if start_time:
+        query = query.gte("created_at", start_time.isoformat())
+    if end_time:
+        query = query.lte("created_at", end_time.isoformat())
+
+    events = [_row_to_event(row) for row in query.execute().data]
+
+    if event_type:
+        try:
+            target = EventType(event_type)
+            events = [e for e in events if e.resolved_type == target]
+        except ValueError:
+            pass  # unrecognised type value — return all rather than erroring
+
+    return events[:limit]
