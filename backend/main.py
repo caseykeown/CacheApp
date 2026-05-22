@@ -33,6 +33,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 from supabase import Client, create_client
 
+from services import enrich_event_with_llm, normalize_input, persist_event
+
 load_dotenv()
 
 # ---------------------------------------------------------------------------
@@ -325,6 +327,52 @@ async def parse_brain_dump(payload: ParseRequest):
             "caffeine": {
                 "items": caffeine_items,
                 "total_mg": sum(c["mg"] for c in caffeine_items),
+            },
+        },
+    )
+
+
+@app.post("/v1/events")
+async def ingest_event(payload: ParseRequest):
+    # Idempotency — same guard as /parse
+    if is_duplicate(payload.id):
+        return JSONResponse(
+            status_code=200,
+            content={"status": "duplicate", "id": payload.id},
+        )
+
+    # Stage 1: normalize input + deterministic caffeine extraction
+    event = normalize_input(
+        request_id=payload.id,
+        text_input=payload.text_input,
+        source=payload.source.value,
+        timestamp=payload.timestamp,
+        caffeine_db=CAFFEINE_DB,
+    )
+
+    # Stage 2: LLM enrichment
+    try:
+        event = await enrich_event_with_llm(event, OLLAMA_BASE_URL, OLLAMA_MODEL)
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=f"LLM error: {exc}")
+
+    # Stage 3: persist canonical record
+    try:
+        persist_event(event, supabase, WEB_USER_ID)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Supabase write failed: {exc}")
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "ok",
+            "id": str(event.id),
+            "tasks": [t.model_dump() for t in event.derived_fields.tasks],
+            "raw_ideas": event.derived_fields.raw_ideas,
+            "mood_signal": event.derived_fields.mood_signal,
+            "caffeine": {
+                "items": [c.model_dump() for c in event.derived_fields.caffeine_items],
+                "total_mg": event.derived_fields.total_caffeine_mg,
             },
         },
     )
