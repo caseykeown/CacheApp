@@ -30,5 +30,16 @@ env/
 .mcp.json
 skills-lock.json
 
+# TLS certificates and private keys — never commit
+*.key
+*.crt
+*.pem
+
+# Supabase CLI temp state
+backend/supabase/.temp/
+
+# Third-party dependency clone — has its own remote
+supabase-swift/
+
 # Stray artifacts
 backend/exit
