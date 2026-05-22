@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Brain Dump</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet" />
+
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            serif:  ['DM Serif Display', 'serif'],
+            mono:   ['DM Mono', 'monospace'],
+          },
+          colors: {
+            slate: {
+              950: '#080c12',
+              900: '#0d1117',
+              800: '#161b24',
+              700: '#1e2532',
+              600: '#2a3344',
+            },
+            accent: {
+              DEFAULT: '#6ee7b7',   /* emerald-300 */
+              dim:     '#34d399',
+              glow:    'rgba(110,231,183,0.12)',
+            },
+            muted: '#4b5a72',
+            surface: '#111827',
+          },
+          keyframes: {
+            fadeUp: {
+              '0%':   { opacity: '0', transform: 'translateY(14px)' },
+              '100%': { opacity: '1', transform: 'translateY(0)' },
+            },
+            pulse2: {
+              '0%,100%': { opacity: '1' },
+              '50%':     { opacity: '0.3' },
+            },
+            ripple: {
+              '0%':   { transform: 'scale(0.95)', opacity: '0.6' },
+              '100%': { transform: 'scale(1.6)',  opacity: '0' },
+            },
+            slideIn: {
+              '0%':   { opacity: '0', transform: 'translateX(-8px)' },
+              '100%': { opacity: '1', transform: 'translateX(0)' },
+            },
+          },
+          animation: {
+            fadeUp:  'fadeUp 0.4s ease both',
+            pulse2:  'pulse2 1.8s ease-in-out infinite',
+            ripple:  'ripple 1.2s ease-out infinite',
+            slideIn: 'slideIn 0.3s ease both',
+          },
+        },
+      },
+    }
+  </script>
+
+  <style>
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+
+    body {
+      background-color: #080c12;
+      color: #c9d3e0;
+      font-family: 'DM Mono', monospace;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Subtle grid overlay */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(110,231,183,0.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(110,231,183,0.025) 1px, transparent 1px);
+      background-size: 48px 48px;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* Glow blob */
+    .glow-blob {
+      position: fixed;
+      top: -200px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 700px;
+      height: 500px;
+      background: radial-gradient(ellipse at center, rgba(52,211,153,0.07) 0%, transparent 70%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    textarea {
+      resize: none;
+      scrollbar-width: thin;
+      scrollbar-color: #2a3344 transparent;
+    }
+    textarea::-webkit-scrollbar { width: 4px; }
+    textarea::-webkit-scrollbar-track { background: transparent; }
+    textarea::-webkit-scrollbar-thumb { background: #2a3344; border-radius: 2px; }
+
+    textarea::placeholder { color: #2a3344; }
+    textarea:focus { outline: none; }
+
+    /* Char counter flicker */
+    .char-ok   { color: #4b5a72; }
+    .char-warn { color: #fbbf24; }
+
+    /* Task card hover lift */
+    .task-card {
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+    .task-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    }
+
+    /* Urgency badge colors */
+    .urg-high   { background: rgba(239,68,68,0.15);  color: #f87171; border: 1px solid rgba(239,68,68,0.3); }
+    .urg-medium { background: rgba(251,191,36,0.12); color: #fbbf24; border: 1px solid rgba(251,191,36,0.25); }
+    .urg-low    { background: rgba(110,231,183,0.1); color: #6ee7b7; border: 1px solid rgba(110,231,183,0.2); }
+
+    /* Mood badge */
+    .mood-positive    { color: #6ee7b7; }
+    .mood-neutral     { color: #94a3b8; }
+    .mood-stressed    { color: #fbbf24; }
+    .mood-overwhelmed { color: #f87171; }
+
+    /* Scrollable results */
+    #results-panel { max-height: 60vh; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #2a3344 transparent; }
+    #results-panel::-webkit-scrollbar { width: 4px; }
+    #results-panel::-webkit-scrollbar-thumb { background: #2a3344; border-radius: 2px; }
+
+    /* Pending pulse ring */
+    .ring {
+      position: absolute;
+      inset: 0;
+      border-radius: 50%;
+      border: 1px solid rgba(110,231,183,0.4);
+      animation: ripple 1.2s ease-out infinite;
+    }
+    .ring:nth-child(2) { animation-delay: 0.4s; }
+    .ring:nth-child(3) { animation-delay: 0.8s; }
+  </style>
+</head>
+<body>
+
+<div class="glow-blob"></div>
+
+<div class="relative z-10 min-h-screen flex flex-col items-center px-4 py-12 sm:py-16">
+
+  <!-- Header -->
+  <header class="w-full max-w-xl mb-10 animate-fadeUp">
+    <div class="flex items-center gap-3 mb-1">
+      <div class="w-2 h-2 rounded-full bg-accent animate-pulse2"></div>
+      <span class="text-xs tracking-[0.2em] uppercase text-muted font-mono">Brain OS / Web</span>
+    </div>
+    <h1 class="font-serif text-4xl sm:text-5xl text-white leading-tight mt-2">
+      Dump everything.<br/>
+      <span class="italic text-accent">Sort nothing.</span>
+    </h1>
+    <p class="mt-3 text-sm text-muted max-w-sm leading-relaxed">
+      Type whatever's in your head. The system handles the rest.
+    </p>
+  </header>
+
+  <!-- Main card -->
+  <main class="w-full max-w-xl animate-fadeUp" style="animation-delay:0.1s">
+
+    <div id="input-panel" class="rounded-2xl border border-slate-700 bg-slate--800" style="background:rgba(22,27,36,0.9); backdrop-filter:blur(12px);">
+
+      <!-- Textarea area -->
+      <div class="relative p-5 pb-3">
+        <textarea
+          id="dump-input"
+          rows="8"
+          maxlength="4000"
+          placeholder="Had coffee + Red Bull this morning. Need to call the dentist, finish that invoice, remember to pick up meds, and figure out what's going on with the project timeline..."
+          class="w-full bg-transparent text-slate-200 text-sm leading-relaxed font-mono"
+        ></textarea>
+
+        <!-- Char counter -->
+        <div class="flex justify-end mt-1">
+          <span id="char-count" class="text-xs char-ok font-mono">0 / 4000</span>
+        </div>
+      </div>
+
+      <div class="h-px bg-slate-700 mx-5"></div>
+
+      <!-- Toolbar -->
+      <div class="flex items-center justify-between px-5 py-3">
+        <div class="flex items-center gap-2">
+          <!-- Source badge -->
+          <div class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-700 text-xs text-muted">
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9"/>
+            </svg>
+            web
+          </div>
+          <!-- UUID preview -->
+          <div class="hidden sm:block text-xs text-slate-700 font-mono" id="uuid-preview"></div>
+        </div>
+
+        <!-- Submit button -->
+        <button
+          id="submit-btn"
+          onclick="submitDump()"
+          class="relative flex items-center gap-2 px-5 py-2 rounded-xl bg-accent text-slate-900 text-sm font-medium
+                 hover:bg-accent-dim transition-colors duration-150 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M13 7l5 5m0 0l-5 5m5-5H6"/>
+          </svg>
+          Send
+        </button>
+      </div>
+    </div>
+
+    <!-- Status / results area -->
+    <div id="status-area" class="mt-4 hidden"></div>
+
+  </main>
+
+  <!-- Footer -->
+  <footer class="mt-16 text-xs text-slate-700 font-mono text-center animate-fadeUp" style="animation-delay:0.2s">
+    syncs with ios · processed locally via ollama · stored in supabase
+  </footer>
+
+</div>
+
+<!-- Templates (hidden) -->
+<template id="tpl-pending">
+  <div class="rounded-2xl border border-slate-700 p-6 flex items-center gap-5"
+       style="background:rgba(22,27,36,0.9)">
+    <!-- Pulsing orb -->
+    <div class="relative w-10 h-10 flex-shrink-0 flex items-center justify-center">
+      <div class="ring"></div>
+      <div class="ring"></div>
+      <div class="ring"></div>
+      <div class="w-3 h-3 rounded-full bg-accent"></div>
+    </div>
+    <div>
+      <p class="text-sm text-white font-mono">Processing...</p>
+      <p class="text-xs text-muted mt-0.5">Parsing with Qwen · Writing to Supabase</p>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-error">
+  <div class="rounded-2xl border border-red-900 bg-red-950/30 p-5 animate-fadeUp">
+    <div class="flex items-start gap-3">
+      <svg class="w-4 h-4 text-red-400 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+      </svg>
+      <div>
+        <p class="text-sm text-red-400 font-mono">Submission failed</p>
+        <p class="text-xs text-red-700 mt-0.5" id="error-detail">Unknown error</p>
+      </div>
+    </div>
+    <button onclick="resetUI()" class="mt-4 text-xs text-muted underline hover:text-accent transition-colors">Try again</button>
+  </div>
+</template>
+
+<template id="tpl-duplicate">
+  <div class="rounded-2xl border border-slate-700 p-5 animate-fadeUp" style="background:rgba(22,27,36,0.9)">
+    <div class="flex items-center gap-3">
+      <svg class="w-4 h-4 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+      </svg>
+      <p class="text-sm text-white font-mono">Already received</p>
+    </div>
+    <p class="text-xs text-muted mt-1 ml-7">This dump was already processed (idempotency match).</p>
+    <button onclick="resetUI()" class="mt-4 text-xs text-muted underline hover:text-accent transition-colors ml-7">New dump</button>
+  </div>
+</template>
+
+<script>
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+function uuidv4() {
+  return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
+    (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
+  );
+}
+
+let _currentUUID = uuidv4();
+
+// Show UUID in footer preview
+function refreshUUID() {
+  _currentUUID = uuidv4();
+  const el = document.getElementById('uuid-preview');
+  if (el) el.textContent = _currentUUID.split('-')[0] + '...';
+}
+refreshUUID();
+
+// Char counter
+document.getElementById('dump-input').addEventListener('input', function() {
+  const len = this.value.length;
+  const el = document.getElementById('char-count');
+  el.textContent = `${len} / 4000`;
+  el.className = len > 3500 ? 'text-xs char-warn font-mono' : 'text-xs char-ok font-mono';
+});
+
+// ---------------------------------------------------------------------------
+// State helpers
+// ---------------------------------------------------------------------------
+function showStatus(html) {
+  const el = document.getElementById('status-area');
+  el.innerHTML = html;
+  el.classList.remove('hidden');
+}
+
+function showTemplate(id) {
+  const tpl = document.getElementById(id);
+  showStatus(tpl.innerHTML);
+}
+
+function resetUI() {
+  document.getElementById('status-area').classList.add('hidden');
+  document.getElementById('status-area').innerHTML = '';
+  document.getElementById('dump-input').value = '';
+  document.getElementById('char-count').textContent = '0 / 4000';
+  document.getElementById('submit-btn').disabled = false;
+  refreshUUID();
+  document.getElementById('dump-input').focus();
+}
+
+// ---------------------------------------------------------------------------
+// Results renderer
+// ---------------------------------------------------------------------------
+function urgencyClass(u) {
+  if (u === 'high')   return 'urg-high';
+  if (u === 'low')    return 'urg-low';
+  return 'urg-medium';
+}
+
+function moodClass(m) {
+  return `mood-${m}` || 'mood-neutral';
+}
+
+function moodIcon(m) {
+  const icons = {
+    positive:    '◎',
+    neutral:     '◌',
+    stressed:    '◈',
+    overwhelmed: '◉',
+  };
+  return icons[m] || '◌';
+}
+
+function renderResults(data) {
+  const { tasks = [], raw_ideas = [], mood_signal, caffeine } = data;
+
+  let html = `<div id="results-panel" class="space-y-3 animate-fadeUp">`;
+
+  // Header bar
+  html += `
+    <div class="flex items-center justify-between px-1 mb-2">
+      <p class="text-xs tracking-widest uppercase text-muted">Extracted</p>
+      <div class="flex items-center gap-3 text-xs text-muted">
+        ${mood_signal && mood_signal !== 'null' ? `<span class="${moodClass(mood_signal)}">${moodIcon(mood_signal)} ${mood_signal}</span>` : ''}
+        ${caffeine.total_mg > 0 ? `<span class="text-yellow-500/70">⚡ ${caffeine.total_mg}mg caffeine</span>` : ''}
+      </div>
+    </div>
+  `;
+
+  // Tasks
+  if (tasks.length > 0) {
+    tasks.forEach((t, i) => {
+      html += `
+        <div class="task-card rounded-xl border border-slate-700 p-4 cursor-default"
+             style="background:rgba(22,27,36,0.9); animation: slideIn 0.3s ease ${i * 0.06}s both">
+          <div class="flex items-start justify-between gap-3">
+            <p class="text-sm text-slate-200 font-mono leading-snug flex-1">${escHtml(t.title)}</p>
+            <span class="text-[10px] px-2 py-0.5 rounded-full ${urgencyClass(t.urgency)} flex-shrink-0 mt-0.5">
+              ${t.urgency || 'medium'}
+            </span>
+          </div>
+          ${t.notes ? `<p class="text-xs text-muted mt-1.5 leading-relaxed">${escHtml(t.notes)}</p>` : ''}
+          ${t.focus_tags && t.focus_tags.length > 0 ? `
+            <div class="flex flex-wrap gap-1.5 mt-2">
+              ${t.focus_tags.map(tag => `
+                <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-700 text-slate-400 font-mono">#${escHtml(tag)}</span>
+              `).join('')}
+            </div>
+          ` : ''}
+        </div>
+      `;
+    });
+  }
+
+  // Raw ideas
+  if (raw_ideas.length > 0) {
+    html += `
+      <div class="rounded-xl border border-slate-700/50 p-4" style="background:rgba(13,17,23,0.8)">
+        <p class="text-[10px] tracking-widest uppercase text-slate-600 mb-2">Notes & Ideas</p>
+        <ul class="space-y-1.5">
+          ${raw_ideas.map(idea => `
+            <li class="flex items-start gap-2 text-xs text-muted">
+              <span class="text-slate-700 mt-0.5 flex-shrink-0">—</span>
+              <span>${escHtml(idea)}</span>
+            </li>
+          `).join('')}
+        </ul>
+      </div>
+    `;
+  }
+
+  // Caffeine detail
+  if (caffeine.items.length > 0) {
+    html += `
+      <div class="rounded-xl border border-yellow-900/30 p-4" style="background:rgba(120,80,0,0.08)">
+        <p class="text-[10px] tracking-widest uppercase text-yellow-700 mb-2">Caffeine Detected</p>
+        <div class="flex flex-wrap gap-2">
+          ${caffeine.items.map(c => `
+            <span class="text-xs px-2 py-0.5 rounded bg-yellow-900/20 text-yellow-500/70 font-mono border border-yellow-900/30">
+              ${escHtml(c.name)} · ${c.mg}mg
+            </span>
+          `).join('')}
+        </div>
+        <p class="text-xs text-yellow-700 mt-2">Total: ${caffeine.total_mg}mg</p>
+      </div>
+    `;
+  }
+
+  // Done action
+  html += `
+    <div class="pt-1 flex items-center justify-between">
+      <div class="flex items-center gap-2 text-xs text-slate-600">
+        <svg class="w-3 h-3 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/>
+        </svg>
+        Saved to Supabase
+      </div>
+      <button onclick="resetUI()"
+        class="text-xs text-muted hover:text-accent transition-colors font-mono underline">
+        New dump
+      </button>
+    </div>
+  `;
+
+  html += `</div>`;
+  showStatus(html);
+}
+
+function escHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// ---------------------------------------------------------------------------
+// Submit
+// ---------------------------------------------------------------------------
+async function submitDump() {
+  const text = document.getElementById('dump-input').value.trim();
+  if (!text) {
+    document.getElementById('dump-input').focus();
+    return;
+  }
+
+  const btn = document.getElementById('submit-btn');
+  btn.disabled = true;
+
+  // Generate idempotency token client-side, once per submission
+  const id = _currentUUID;
+
+  // Show pending state immediately (matches iOS paradigm)
+  showTemplate('tpl-pending');
+
+  const payload = {
+    id,
+    text_input: text,
+    source: 'web',
+    timestamp: new Date().toISOString(),
+  };
+
+  try {
+    const res = await fetch('/parse', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      const errEl = document.getElementById('tpl-error').content.cloneNode(true);
+      // Can't use template directly for dynamic text; render manually
+      const statusArea = document.getElementById('status-area');
+      statusArea.innerHTML = document.getElementById('tpl-error').innerHTML;
+      const detail = statusArea.querySelector('#error-detail');
+      if (detail) detail.textContent = body.detail || `HTTP ${res.status}`;
+      btn.disabled = false;
+      return;
+    }
+
+    const data = await res.json();
+
+    if (data.status === 'duplicate') {
+      showTemplate('tpl-duplicate');
+      btn.disabled = false;
+      return;
+    }
+
+    renderResults(data);
+    // Don't re-enable submit — user must click "New dump"
+
+  } catch (err) {
+    const statusArea = document.getElementById('status-area');
+    statusArea.innerHTML = document.getElementById('tpl-error').innerHTML;
+    const detail = statusArea.querySelector('#error-detail');
+    if (detail) detail.textContent = err.message || 'Network error';
+    btn.disabled = false;
+  }
+}
+
+// Submit on Cmd/Ctrl + Enter
+document.getElementById('dump-input').addEventListener('keydown', function(e) {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+    e.preventDefault();
+    submitDump();
+  }
+});
+</script>
+</body>
+</html>
