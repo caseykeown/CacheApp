@@ -364,3 +364,25 @@ def fetch_events(
             pass  # unrecognised type value — return all rather than erroring
 
     return events[:limit]
+
+
+def fetch_event_by_id(
+    supabase_client: Client,
+    event_id: str,
+    user_id: str,
+) -> Event | None:
+    """Return a single event by UUID, or None if not found."""
+    result = (
+        supabase_client.table("tasks")
+        .select(
+            "id, source, timestamp, raw_text, tasks, raw_ideas, "
+            "mood_signal, caffeine_items, total_caffeine_mg, created_at"
+        )
+        .eq("id", event_id)
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    if not result.data:
+        return None
+    return _row_to_event(result.data[0])

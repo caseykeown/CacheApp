@@ -359,8 +359,15 @@ function moodIcon(m) {
   return icons[m] || '◌';
 }
 
-function renderResults(data) {
-  const { tasks = [], raw_ideas = [], mood_signal, caffeine } = data;
+function renderResults(df) {
+  const tasks       = df.tasks        || [];
+  const raw_ideas   = df.raw_ideas    || [];
+  const mood_signal = df.mood_signal;
+  // canonical DerivedFields uses caffeine_items / total_caffeine_mg
+  const caffeine = {
+    items:    df.caffeine_items    || [],
+    total_mg: df.total_caffeine_mg || 0,
+  };
 
   let html = `<div id="results-panel" class="space-y-3 animate-fadeUp">`;
 
@@ -490,7 +497,7 @@ async function submitDump() {
   };
 
   try {
-    const res = await fetch('/parse', {
+    const res = await fetch('/v1/events', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -516,7 +523,7 @@ async function submitDump() {
       return;
     }
 
-    renderResults(data);
+    renderResults(data.event.derived_fields);
     // Don't re-enable submit — user must click "New dump"
 
   } catch (err) {

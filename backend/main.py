@@ -1,14 +1,20 @@
 """
 Brain Dump Ingestion API
 
-Endpoints:
-  POST /parse            — legacy ingestion (iOS + web); delegates to _ingest()
-  POST /v1/events        — versioned ingestion; delegates to _ingest()
-  GET  /v1/events        — unified read: latest N events, with optional filters
-                           ?limit=     max records (default 20, cap 100)
-                           ?type=      EventType value (brain_dump|log_caffeine|…)
-                           ?start_time= ISO-8601 lower bound on created_at
-                           ?end_time=   ISO-8601 upper bound on created_at
+Canonical API (v1):
+  POST /v1/events                — ingest a brain dump; returns canonical Event
+  GET  /v1/events                — list events with optional filters
+                                   ?limit=      max records (default 20, cap 100)
+                                   ?type=       EventType (brain_dump|log_caffeine|…)
+                                   ?start_time= ISO-8601 lower bound on created_at
+                                   ?end_time=   ISO-8601 upper bound on created_at
+  GET  /v1/events/{event_id}     — fetch a single event by UUID
+
+Compatibility (deprecated, preserved for transition):
+  POST /parse            — forwards to the same pipeline; logs a deprecation warning
+                           returns legacy response shape for existing callers
+
+System:
   GET  /health           — liveness check
 
 All ingestion logic lives in services/event_service.py.
@@ -28,11 +34,14 @@ Env vars (or .env file):
 from __future__ import annotations
 
 import json
+import logging
 import os
 import uuid
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+
+log = logging.getLogger("cache_app")
 
 import httpx
 from dotenv import load_dotenv
@@ -42,7 +51,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 from supabase import Client, create_client
 
-from services import enrich_event_with_llm, fetch_events, normalize_input, persist_event
+from services import (
+    enrich_event_with_llm,
+    fetch_event_by_id,
+    fetch_events,
+    normalize_input,
+    persist_event,
+)
 
 load_dotenv()
 
@@ -177,13 +192,13 @@ async def serve_index():
     return JSONResponse({"status": "Brain Dump API running. Place index.html in ./static/"})
 
 
-async def _ingest(payload: ParseRequest) -> JSONResponse:
-    """Shared pipeline for POST /parse and POST /v1/events."""
-    if is_duplicate(payload.id):
-        return JSONResponse(
-            status_code=200,
-            content={"status": "duplicate", "id": payload.id},
-        )
+async def _ingest(payload: ParseRequest) -> "Event":
+    """
+    Core ingestion pipeline shared by all write endpoints.
+    Callers are responsible for idempotency checks before calling this.
+    Raises HTTPException on LLM or persistence failures.
+    """
+    from models import Event  # local import avoids circular at module level
 
     event = normalize_input(
         request_id=payload.id,
@@ -192,41 +207,51 @@ async def _ingest(payload: ParseRequest) -> JSONResponse:
         timestamp=payload.timestamp,
         caffeine_db=CAFFEINE_DB,
     )
-
     try:
         event = await enrich_event_with_llm(event, OLLAMA_BASE_URL, OLLAMA_MODEL)
     except (httpx.HTTPError, ValueError) as exc:
         raise HTTPException(status_code=502, detail=f"LLM error: {exc}")
-
     try:
         persist_event(event, supabase, WEB_USER_ID)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Supabase write failed: {exc}")
+    return event
 
-    return JSONResponse(
-        status_code=200,
-        content={
-            "status": "ok",
-            "id": str(event.id),
-            "tasks": [t.model_dump() for t in event.derived_fields.tasks],
-            "raw_ideas": event.derived_fields.raw_ideas,
-            "mood_signal": event.derived_fields.mood_signal,
-            "caffeine": {
-                "items": [c.model_dump() for c in event.derived_fields.caffeine_items],
-                "total_mg": event.derived_fields.total_caffeine_mg,
-            },
-        },
-    )
+
+def _duplicate_response(event_id: str) -> JSONResponse:
+    return JSONResponse(status_code=200, content={"status": "duplicate", "id": event_id})
 
 
 @app.post("/parse")
 async def parse_brain_dump(payload: ParseRequest):
-    return await _ingest(payload)
+    """Compatibility wrapper — preserved for existing callers during transition."""
+    log.warning(
+        "POST /parse is deprecated and will be removed in a future release. "
+        "Migrate to POST /v1/events."
+    )
+    if is_duplicate(payload.id):
+        return _duplicate_response(payload.id)
+    event = await _ingest(payload)
+    # Legacy response shape — kept stable so existing clients require no changes.
+    return JSONResponse(status_code=200, content={
+        "status": "ok",
+        "id": str(event.id),
+        "tasks": [t.model_dump() for t in event.derived_fields.tasks],
+        "raw_ideas": event.derived_fields.raw_ideas,
+        "mood_signal": event.derived_fields.mood_signal,
+        "caffeine": {
+            "items": [c.model_dump() for c in event.derived_fields.caffeine_items],
+            "total_mg": event.derived_fields.total_caffeine_mg,
+        },
+    })
 
 
 @app.post("/v1/events")
 async def ingest_event(payload: ParseRequest):
-    return await _ingest(payload)
+    if is_duplicate(payload.id):
+        return _duplicate_response(payload.id)
+    event = await _ingest(payload)
+    return JSONResponse(status_code=200, content={"event": event.model_dump(mode="json")})
 
 
 @app.get("/v1/events")
@@ -254,6 +279,17 @@ async def list_events(
             "count": len(events),
         },
     )
+
+
+@app.get("/v1/events/{event_id}")
+async def get_event(event_id: uuid.UUID):
+    try:
+        event = fetch_event_by_id(supabase, str(event_id), WEB_USER_ID)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Supabase read failed: {exc}")
+    if event is None:
+        raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
+    return JSONResponse(status_code=200, content={"event": event.model_dump(mode="json")})
 
 
 @app.get("/health")
