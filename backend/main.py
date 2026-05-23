@@ -48,7 +48,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from supabase import Client, create_client
 
 from services import (
@@ -133,6 +133,14 @@ class ParseRequest(BaseModel):
     text_input: str
     source: SourceEnum
     timestamp: str  # ISO-8601
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_content_alias(cls, data: object) -> object:
+        # iOS clients send 'content'; accept as alias for 'text_input'
+        if isinstance(data, dict) and "content" in data and "text_input" not in data:
+            data = {**data, "text_input": data["content"]}
+        return data
 
     @field_validator("id")
     @classmethod

@@ -227,6 +227,7 @@ def persist_event(
         "source":           event.source.value,
         "timestamp":        event.timestamp.isoformat(),
         "raw_text":         event.raw_content,
+        "resolved_type":    event.resolved_type.value,
         "tasks":            tasks_raw,
         "raw_ideas":        event.derived_fields.raw_ideas,
         "mood_signal":      event.derived_fields.mood_signal,
@@ -280,12 +281,20 @@ def _row_to_event(row: dict[str, Any]) -> Event:
         if c.get("name")
     ]
 
+    # Read resolved_type from the column; fall back to content inference for
+    # rows that predate the migration or are missing the field.
+    raw_rt = row.get("resolved_type")
+    try:
+        resolved_type = EventType(raw_rt) if raw_rt else _infer_type(row)
+    except ValueError:
+        resolved_type = _infer_type(row)
+
     return Event(
         id=uuid_module.UUID(str(row["id"])),
         timestamp=ts,
         source=source,
         raw_content=row.get("raw_text") or "",
-        resolved_type=_infer_type(row),
+        resolved_type=resolved_type,
         derived_fields=DerivedFields(
             tasks=tasks,
             raw_ideas=list(row.get("raw_ideas") or []),
@@ -335,35 +344,27 @@ def fetch_events(
     Hard cap: 100 rows per call regardless of limit.
     """
     limit = min(max(limit, 1), 100)
-    # Fetch the full cap when type-filtering to avoid under-returning after
-    # the application-side filter discards non-matching rows.
-    fetch_limit = 100 if event_type else limit
 
     query = (
         supabase_client.table("tasks")
         .select(
-            "id, source, timestamp, raw_text, tasks, raw_ideas, "
+            "id, source, timestamp, raw_text, resolved_type, tasks, raw_ideas, "
             "mood_signal, caffeine_items, total_caffeine_mg, created_at"
         )
         .eq("user_id", user_id)
         .order("created_at", desc=True)
-        .limit(fetch_limit)
+        .limit(limit)
     )
+    if event_type:
+        # Push type filter to DB now that resolved_type is a real column.
+        # Unknown values are silently ignored (returns empty list).
+        query = query.eq("resolved_type", event_type)
     if start_time:
         query = query.gte("created_at", start_time.isoformat())
     if end_time:
         query = query.lte("created_at", end_time.isoformat())
 
-    events = [_row_to_event(row) for row in query.execute().data]
-
-    if event_type:
-        try:
-            target = EventType(event_type)
-            events = [e for e in events if e.resolved_type == target]
-        except ValueError:
-            pass  # unrecognised type value — return all rather than erroring
-
-    return events[:limit]
+    return [_row_to_event(row) for row in query.execute().data]
 
 
 def fetch_event_by_id(
@@ -375,7 +376,7 @@ def fetch_event_by_id(
     result = (
         supabase_client.table("tasks")
         .select(
-            "id, source, timestamp, raw_text, tasks, raw_ideas, "
+            "id, source, timestamp, raw_text, resolved_type, tasks, raw_ideas, "
             "mood_signal, caffeine_items, total_caffeine_mg, created_at"
         )
         .eq("id", event_id)
