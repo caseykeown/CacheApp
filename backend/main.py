@@ -1,5 +1,5 @@
 """
-Brain Dump Ingestion API
+CacheApp Ingestion API
 
 Canonical API (v1):
   POST /v1/events                — ingest a brain dump; returns canonical Event
@@ -74,7 +74,7 @@ WEB_USER_ID: str = os.environ["WEB_USER_ID"]
 CAFFEINE_DB_PATH: Path = Path(__file__).parent / "caffeine_db.json"
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-app = FastAPI(title="Brain Dump API")
+app = FastAPI(title="CacheApp API")
 
 # Serve static assets (CSS, JS, images) from ./static/
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -197,7 +197,7 @@ async def serve_index():
     index = Path(__file__).parent / "static" / "index.html"
     if index.exists():
         return FileResponse(str(index))
-    return JSONResponse({"status": "Brain Dump API running. Place index.html in ./static/"})
+    return JSONResponse({"status": "CacheApp API running. Place index.html in ./static/"})
 
 
 async def _ingest(payload: ParseRequest) -> "Event":
